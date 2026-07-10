@@ -1,0 +1,611 @@
+// =====================================================================
+// Creator Monetization Platform — Prisma Schema
+// PostgreSQL. Security notes:
+//  - Passwords: Argon2id hashes only (never plaintext)
+//  - Refresh tokens: SHA-256 hashes only (opaque token never stored)
+//  - Verification / reset tokens: SHA-256 hashes, single-use, expiring
+//  - 2FA secrets: AES-256-GCM encrypted at rest (see CryptoService)
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------------ enums
+
+enum Role {
+  USER
+  CREATOR
+  MODERATOR
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum KycStatus {
+  NOT_SUBMITTED
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum PlanInterval {
+  MONTHLY
+  QUARTERLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+
+enum MediaType {
+  IMAGE
+  VIDEO
+  AUDIO
+}
+
+enum MediaStatus {
+  PENDING     // signature issued, upload not yet confirmed
+  READY
+  PROCESSING
+  FAILED
+  DELETED
+}
+
+enum ContentAccess {
+  FREE
+  SUBSCRIBERS
+  PAY_PER_VIEW
+}
+
+enum PostStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+  DELETED
+}
+
+enum PurchaseType {
+  POST
+  MEDIA
+  ALBUM
+  BUNDLE
+  MESSAGE
+}
+
+enum TransactionType {
+  SUBSCRIPTION
+  PURCHASE
+  TIP
+  PAYOUT
+  REFUND
+  PLATFORM_FEE
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentProvider {
+  NOWPAYMENTS
+  PAYPAL
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  SEEN
+}
+
+enum NotificationType {
+  NEW_SUBSCRIBER
+  NEW_PURCHASE
+  NEW_TIP
+  NEW_LIKE
+  NEW_COMMENT
+  NEW_MESSAGE
+  SUBSCRIPTION_EXPIRING
+  SUBSCRIPTION_RENEWED
+  SYSTEM
+}
+
+enum ReportStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+// ------------------------------------------------------------------ auth & identity
+
+model User {
+  id                 String        @id @default(uuid())
+  email              String        @unique
+  emailVerifiedAt    DateTime?
+  passwordHash       String? // null for social-only accounts
+  role               Role          @default(USER)
+  status             AccountStatus @default(ACTIVE)
+
+  // 2FA-ready
+  twoFactorEnabled   Boolean       @default(false)
+  twoFactorSecretEnc String? // AES-256-GCM encrypted TOTP secret
+
+  // brute-force protection
+  failedLoginCount   Int           @default(0)
+  lockedUntil        DateTime?
+
+  // social login identities
+  googleId           String?       @unique
+  appleId            String?       @unique
+
+  profile            Profile?
+  creator            CreatorProfile?
+  wallet             Wallet?
+
+  sessions           Session[]
+  verificationTokens VerificationToken[]
+  posts              Post[]
+  media              Media[]
+  subscriptions      Subscription[] @relation("SubscriberSubs")
+  purchases          Purchase[]
+  tipsSent           Tip[]          @relation("TipsSent")
+  tipsReceived       Tip[]          @relation("TipsReceived")
+  transactions       Transaction[]
+  messages           Message[]
+  participants       Participant[]
+  notifications      Notification[]
+  comments           Comment[]
+  likes              Like[]
+  bookmarks          Bookmark[]
+  reportsMade        Report[]       @relation("Reporter")
+  reportsReceived    Report[]       @relation("Reported")
+  blocksMade         Block[]        @relation("Blocker")
+  blocksReceived     Block[]        @relation("Blocked")
+  following          Follow[]       @relation("Follower")
+  followers          Follow[]       @relation("Followee")
+  auditLogs          AuditLog[]
+
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([email])
+  @@index([status])
+}
+
+model Profile {
+  id          String  @id @default(uuid())
+  userId      String  @unique
+  user        User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  username    String  @unique
+  displayName String
+  bio         String? @db.VarChar(1000)
+  avatarMediaId String?
+  bannerMediaId String?
+  location    String?
+  socialLinks Json? // validated shape: { twitter?, instagram?, tiktok?, website? }
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([username])
+}
+
+// Device session: one row per logged-in device. Holds current (hashed)
+// refresh token. Rotation replaces the hash; reuse of an old hash is
+// treated as theft and revokes the whole session family.
+model Session {
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash  String    @unique // SHA-256 of opaque refresh token
+  previousTokenHash String?   @unique // detects replay of rotated token
+  userAgent         String?
+  ipAddress         String?
+  deviceName        String?
+  lastUsedAt        DateTime  @default(now())
+  expiresAt         DateTime
+  revokedAt         DateTime?
+  createdAt         DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model VerificationToken {
+  id        String                @id @default(uuid())
+  userId    String
+  user      User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String                @unique // SHA-256
+  type      VerificationTokenType
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime              @default(now())
+
+  @@index([userId, type])
+}
+
+// ------------------------------------------------------------------ creators
+
+model CreatorProfile {
+  id                   String    @id @default(uuid())
+  userId               String    @unique
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  kycStatus            KycStatus @default(NOT_SUBMITTED)
+  verifiedBadge        Boolean   @default(false)
+  welcomeMessage       String?   @db.VarChar(2000)
+  themeColor           String? // validated hex
+  // Payout destinations: PayPal receiver email and/or a crypto payout address.
+  payoutPaypalEmail    String?
+  payoutCryptoCurrency String? // e.g. "btc", "usdttrc20"
+  payoutCryptoAddress  String?
+  plans                SubscriptionPlan[]
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+}
+
+model SubscriptionPlan {
+  id            String       @id @default(uuid())
+  creatorId     String
+  creator       CreatorProfile @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  interval      PlanInterval
+  priceCents    Int // stored in smallest currency unit
+  currency      String       @default("USD")
+  trialDays     Int          @default(0)
+  discountPct   Int          @default(0) // active campaign discount
+  active        Boolean      @default(true)
+  subscriptions Subscription[]
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([creatorId, interval])
+}
+
+model Subscription {
+  id               String             @id @default(uuid())
+  subscriberId     String
+  subscriber       User               @relation("SubscriberSubs", fields: [subscriberId], references: [id])
+  creatorUserId    String // denormalized for fast access checks
+  planId           String
+  plan             SubscriptionPlan   @relation(fields: [planId], references: [id])
+  status           SubscriptionStatus @default(ACTIVE)
+  provider         PaymentProvider
+  providerSubId    String?            @unique
+  currentPeriodEnd DateTime
+  cancelAtPeriodEnd Boolean           @default(false)
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  @@unique([subscriberId, creatorUserId])
+  @@index([creatorUserId, status])
+  @@index([currentPeriodEnd])
+}
+
+// ------------------------------------------------------------------ media & vault
+
+model Media {
+  id           String       @id @default(uuid())
+  ownerId      String
+  owner        User         @relation(fields: [ownerId], references: [id])
+  type         MediaType
+  status       MediaStatus  @default(PENDING)
+  // Cloudinary — we store only references, never secrets
+  publicId     String       @unique
+  resourceType String
+  format       String?
+  width        Int?
+  height       Int?
+  duration     Float?
+  bytes        Int?
+  folderId     String?
+  folder       VaultFolder? @relation(fields: [folderId], references: [id])
+  access       ContentAccess @default(FREE)
+  priceCents   Int? // when PAY_PER_VIEW
+  deletedAt    DateTime? // soft delete (trash)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  postMedia    PostMedia[]
+  purchases    Purchase[]
+
+  @@index([ownerId, status])
+  @@index([ownerId, folderId])
+}
+
+model VaultFolder {
+  id        String   @id @default(uuid())
+  ownerId   String
+  name      String
+  parentId  String?
+  parent    VaultFolder?  @relation("FolderTree", fields: [parentId], references: [id])
+  children  VaultFolder[] @relation("FolderTree")
+  media     Media[]
+  createdAt DateTime @default(now())
+
+  @@unique([ownerId, parentId, name])
+  @@index([ownerId])
+}
+
+// ------------------------------------------------------------------ posts & engagement
+
+model Post {
+  id          String        @id @default(uuid())
+  authorId    String
+  author      User          @relation(fields: [authorId], references: [id])
+  body        String?       @db.VarChar(10000)
+  access      ContentAccess @default(FREE)
+  priceCents  Int?
+  status      PostStatus    @default(PUBLISHED)
+  scheduledAt DateTime?
+  pinned      Boolean       @default(false)
+  hashtags    String[]
+  media       PostMedia[]
+  comments    Comment[]
+  likes       Like[]
+  bookmarks   Bookmark[]
+  purchases   Purchase[]
+  likeCount    Int @default(0)
+  commentCount Int @default(0)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  deletedAt   DateTime?
+
+  @@index([authorId, status, createdAt])
+  @@index([status, scheduledAt])
+}
+
+model PostMedia {
+  postId   String
+  mediaId  String
+  position Int    @default(0)
+  post     Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  media    Media  @relation(fields: [mediaId], references: [id])
+
+  @@id([postId, mediaId])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id])
+  body      String   @db.VarChar(2000)
+  parentId  String?
+  createdAt DateTime @default(now())
+  deletedAt DateTime?
+
+  @@index([postId, createdAt])
+}
+
+model Like {
+  userId    String
+  postId    String
+  user      User   @relation(fields: [userId], references: [id])
+  post      Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, postId])
+}
+
+model Bookmark {
+  userId    String
+  postId    String
+  user      User   @relation(fields: [userId], references: [id])
+  post      Post   @relation(fields: [postId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, postId])
+}
+
+model Follow {
+  followerId String
+  followeeId String
+  follower   User @relation("Follower", fields: [followerId], references: [id])
+  followee   User @relation("Followee", fields: [followeeId], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@id([followerId, followeeId])
+  @@index([followeeId])
+}
+
+// ------------------------------------------------------------------ commerce
+
+model Wallet {
+  id            String @id @default(uuid())
+  userId        String @unique
+  user          User   @relation(fields: [userId], references: [id])
+  balanceCents  Int    @default(0) // available creator earnings
+  pendingCents  Int    @default(0) // in clearing window
+  currency      String @default("USD")
+  updatedAt     DateTime @updatedAt
+}
+
+model Purchase {
+  id          String       @id @default(uuid())
+  buyerId     String
+  buyer       User         @relation(fields: [buyerId], references: [id])
+  type        PurchaseType
+  postId      String?
+  post        Post?        @relation(fields: [postId], references: [id])
+  mediaId     String?
+  media       Media?       @relation(fields: [mediaId], references: [id])
+  amountCents Int
+  currency    String       @default("USD")
+  provider    PaymentProvider
+  providerRef String?      @unique
+  createdAt   DateTime     @default(now())
+
+  @@unique([buyerId, postId])
+  @@index([buyerId])
+}
+
+model Tip {
+  id           String  @id @default(uuid())
+  senderId     String
+  sender       User    @relation("TipsSent", fields: [senderId], references: [id])
+  recipientId  String
+  recipient    User    @relation("TipsReceived", fields: [recipientId], references: [id])
+  amountCents  Int
+  currency     String  @default("USD")
+  anonymous    Boolean @default(false)
+  message      String? @db.VarChar(500)
+  provider     PaymentProvider
+  providerRef  String? @unique
+  createdAt    DateTime @default(now())
+
+  @@index([recipientId, createdAt])
+}
+
+model Transaction {
+  id            String            @id @default(uuid())
+  userId        String
+  user          User              @relation(fields: [userId], references: [id])
+  type          TransactionType
+  status        TransactionStatus @default(PENDING)
+  amountCents   Int
+  feeCents      Int               @default(0)
+  currency      String            @default("USD")
+  provider      PaymentProvider
+  providerRef   String?           @unique
+  idempotencyKey String?          @unique
+  metadata      Json?
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([userId, createdAt])
+}
+
+// Processed webhook events — idempotency guard against replays.
+model WebhookEvent {
+  id         String   @id @default(uuid())
+  provider   PaymentProvider
+  eventId    String
+  receivedAt DateTime @default(now())
+
+  @@unique([provider, eventId])
+}
+
+// ------------------------------------------------------------------ messaging
+
+model Conversation {
+  id            String        @id @default(uuid())
+  participants  Participant[]
+  messages      Message[]
+  lastMessageAt DateTime?
+  createdAt     DateTime      @default(now())
+
+  @@index([lastMessageAt])
+}
+
+model Participant {
+  conversationId String
+  userId         String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id])
+  muted          Boolean      @default(false)
+  archived       Boolean      @default(false)
+  pinned         Boolean      @default(false)
+  lastReadAt     DateTime?
+  deletedAt      DateTime? // "delete for me"
+  joinedAt       DateTime     @default(now())
+
+  @@id([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String        @id @default(uuid())
+  conversationId String
+  conversation   Conversation  @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User          @relation(fields: [senderId], references: [id])
+  body           String?       @db.VarChar(5000)
+  mediaIds       String[]
+  replyToId      String?
+  status         MessageStatus @default(SENT)
+  editedAt       DateTime?
+  deletedForAll  Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// ------------------------------------------------------------------ notifications & moderation
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String?
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, readAt, createdAt])
+}
+
+model Report {
+  id             String       @id @default(uuid())
+  reporterId     String
+  reporter       User         @relation("Reporter", fields: [reporterId], references: [id])
+  reportedUserId String
+  reportedUser   User         @relation("Reported", fields: [reportedUserId], references: [id])
+  targetType     String // POST | MESSAGE | USER | MEDIA
+  targetId       String?
+  reason         String       @db.VarChar(1000)
+  status         ReportStatus @default(OPEN)
+  resolvedById   String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model Block {
+  blockerId String
+  blockedId String
+  blocker   User @relation("Blocker", fields: [blockerId], references: [id])
+  blocked   User @relation("Blocked", fields: [blockedId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@id([blockerId, blockedId])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String // e.g. AUTH_LOGIN, AUTH_REFRESH_REUSE_DETECTED, ADMIN_BAN_USER
+  ip        String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+}
