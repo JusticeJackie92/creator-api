@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { MediaService } from './media.service';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
+import { Public } from '../common/decorators/public.decorator';
 import { ConfirmUploadDto, CreateFolderDto, SignUploadDto, UpdateMediaAccessDto } from './dto/media.dto';
 
 @ApiTags('media')
@@ -50,6 +51,12 @@ export class MediaController {
   @Delete(':id')
   trash(@CurrentUser() user: AuthUser, @Param('id') id: string) {
     return this.media.trash(user.id, id);
+  }
+
+  @Public()
+  @Get(':id/public-url')
+  publicUrl(@Param('id') id: string) {
+    return this.media.getPublicUrl(id);
   }
 
   @Get(':id/meta')

@@ -12,16 +12,18 @@ import {
 const REFRESH_COOKIE = 'rt';
 
 /**
- * Refresh tokens travel ONLY in a signed httpOnly, Secure, SameSite=strict
- * cookie scoped to the refresh path — inaccessible to JS (XSS-hardened) and
- * never sent cross-site (CSRF-hardened). Access tokens are returned in the
- * body and held in memory by clients.
+ * Refresh tokens travel ONLY in a signed httpOnly, Secure cookie scoped to the
+ * refresh path — inaccessible to JS (XSS-hardened). In production the web app
+ * and API are on different domains, so the cookie must be SameSite=None (with
+ * Secure) to be sent cross-site; locally we keep Lax over http.
  */
+const CROSS_SITE = process.env.NODE_ENV === 'production';
+
 function setRefreshCookie(res: Response, token: string) {
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    secure: CROSS_SITE,
+    sameSite: CROSS_SITE ? 'none' : 'lax',
     signed: true,
     path: '/api/v1/auth/refresh',
     maxAge: 30 * 24 * 3600 * 1000,
@@ -29,7 +31,11 @@ function setRefreshCookie(res: Response, token: string) {
 }
 
 function clearRefreshCookie(res: Response) {
-  res.clearCookie(REFRESH_COOKIE, { path: '/api/v1/auth/refresh' });
+  res.clearCookie(REFRESH_COOKIE, {
+    path: '/api/v1/auth/refresh',
+    sameSite: CROSS_SITE ? 'none' : 'lax',
+    secure: CROSS_SITE,
+  });
 }
 
 function meta(req: Request) {

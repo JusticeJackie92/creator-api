@@ -229,6 +229,14 @@ export class MediaService {
    * refuses un-signed requests. With plain `upload` delivery, anyone holding
    * the (random, unguessable) URL can view it — fine for dev, not for PPV at scale.
    */
+  /** Public delivery for FREE media only (avatars, banners, free posts) — no auth. */
+  async getPublicUrl(mediaId: string) {
+    const media = await this.prisma.media.findUnique({ where: { id: mediaId } });
+    if (!media || media.deletedAt || media.status !== 'READY') throw new NotFoundException();
+    if (media.access !== 'FREE') throw new ForbiddenException('Content locked');
+    return { url: this.signedUrl(media), type: media.type, width: media.width, height: media.height };
+  }
+
   private signedUrl(media: { publicId: string; resourceType: string; type: string }) {
     return cloudinary.url(media.publicId, {
       resource_type: media.resourceType,

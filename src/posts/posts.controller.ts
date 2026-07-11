@@ -4,6 +4,7 @@ import { PostsService } from './posts.service';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { Public } from '../common/decorators/public.decorator';
 import { CreatePostDto, CommentDto } from './dto/post.dto';
 
 @ApiTags('posts')
@@ -26,6 +27,13 @@ export class PostsController {
   @Get('bookmarks')
   bookmarks(@CurrentUser() user: AuthUser, @Query('cursor') cursor?: string) {
     return this.posts.bookmarksFeed(user.id, cursor);
+  }
+
+  @Public()
+  @Get('creator/:creatorUserId/public')
+  publicCreatorFeed(@Param('creatorUserId') creatorUserId: string, @Query('cursor') cursor?: string) {
+    // Empty viewer id => only FREE posts are unlocked; the rest return locked previews.
+    return this.posts.creatorFeed('', creatorUserId, cursor);
   }
 
   @Get('creator/:creatorUserId')

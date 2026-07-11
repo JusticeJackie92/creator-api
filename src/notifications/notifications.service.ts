@@ -31,4 +31,14 @@ export class NotificationsService {
     });
     return { message: 'All read' };
   }
+
+  /** Mark one category read — e.g. NEW_MESSAGE when the user opens Messages. */
+  async markTypeRead(userId: string, type: NotificationType) {
+    await this.prisma.notification.updateMany({
+      where: { userId, type, readAt: null },
+      data: { readAt: new Date() },
+    });
+    const unreadCount = await this.prisma.notification.count({ where: { userId, readAt: null } });
+    return { unreadCount };
+  }
 }

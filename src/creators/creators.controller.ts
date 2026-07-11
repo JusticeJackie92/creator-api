@@ -4,6 +4,7 @@ import { CreatorsService } from './creators.service';
 import { CurrentUser, AuthUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { Public } from '../common/decorators/public.decorator';
 import { BecomeCreatorDto, UpsertPlanDto } from './dto/creator.dto';
 
 @ApiTags('creators')
@@ -11,6 +12,12 @@ import { BecomeCreatorDto, UpsertPlanDto } from './dto/creator.dto';
 @Controller('creators')
 export class CreatorsController {
   constructor(private readonly creators: CreatorsService) {}
+
+  @Public()
+  @Get('discover/public')
+  discoverPublic(@Query('limit') limit?: string) {
+    return this.creators.discover(undefined, limit ? Number(limit) : 24);
+  }
 
   @Get('discover')
   discover(@CurrentUser() user: AuthUser, @Query('limit') limit?: string) {
