@@ -151,6 +151,11 @@ model User {
   role               Role          @default(USER)
   status             AccountStatus @default(ACTIVE)
 
+  // Legal: Terms of Service / Privacy Policy / 18+ content acknowledgement,
+  // captured at registration. Required before an account can be created.
+  termsAcceptedAt    DateTime?
+  termsVersion       String?
+
   // 2FA-ready
   twoFactorEnabled   Boolean       @default(false)
   twoFactorSecretEnc String? // AES-256-GCM encrypted TOTP secret
@@ -312,7 +317,7 @@ model Media {
   owner        User         @relation(fields: [ownerId], references: [id])
   type         MediaType
   status       MediaStatus  @default(PENDING)
-  // Cloudinary — we store only references, never secrets
+  // Storj (S3-compatible) object key — we store only the key, never credentials
   publicId     String       @unique
   resourceType String
   format       String?

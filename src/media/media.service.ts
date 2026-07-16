@@ -1,5 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { v2 as cloudinary } from 'cloudinary';
+import {
+  S3Client,
+  PutObjectCommand,
+  HeadObjectCommand,
+  GetObjectCommand,
+} from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { randomUUID } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfirmUploadDto, CreateFolderDto, UpdateMediaAccessDto } from './dto/media.dto';
 import { buildCursorQuery, toCursorPage } from '../common/utils/pagination.util';
@@ -9,78 +16,104 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;   // 25 MB
 const MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
 const ALLOWED_IMAGE_FORMATS = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'heic'];
 const ALLOWED_VIDEO_FORMATS = ['mp4', 'mov', 'webm', 'mkv'];
+const CONTENT_TYPE_BY_FORMAT: Record<string, string> = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp',
+  gif: 'image/gif', heic: 'image/heic',
+  mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm', mkv: 'video/x-matroska',
+};
+
+const SIGN_UPLOAD_TTL_SECONDS = 10 * 60;   // 10 min to complete the PUT
+const DELIVERY_URL_TTL_SECONDS = 60 * 60;  // 1 hour signed GET
 
 /**
- * Direct signed upload flow — the API secret NEVER leaves the server and
- * files NEVER pass through our API:
+ * Direct signed upload flow — the storage credentials NEVER leave the server
+ * and files NEVER pass through our API:
  *
- *   1. Client asks POST /media/sign          -> server returns a signature
- *      scoped to folder `users/{userId}` with a 10-min timestamp window.
- *   2. Client uploads the file straight to Cloudinary with that signature.
- *   3. Client calls POST /media/confirm with the returned public_id.
- *   4. Server INDEPENDENTLY verifies the asset via Cloudinary's Admin API
- *      (never trusting client-supplied metadata), validates format/size,
- *      and only then persists the media row.
+ *   1. Client asks POST /media/sign          -> server picks the object key
+ *      (scoped to `users/{userId}/...`, never client-controlled) and returns
+ *      a presigned PUT URL valid for 10 minutes.
+ *   2. Client uploads the file straight to Storj (S3-compatible) with that URL.
+ *   3. Client calls POST /media/confirm with the returned key.
+ *   4. Server INDEPENDENTLY verifies the object via a HEAD request (never
+ *      trusting client-supplied metadata), validates format/size, and only
+ *      then persists the media row.
  *
  * A `virusScanHook()` seam is provided for wiring an AV/moderation pipeline.
  */
 @Injectable()
 export class MediaService {
+  private readonly s3: S3Client;
+  private readonly bucket: string;
+
   constructor(private readonly prisma: PrismaService) {
-    cloudinary.config({
-      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-      api_key: process.env.CLOUDINARY_API_KEY,
-      api_secret: process.env.CLOUDINARY_API_SECRET,
-      secure: true,
+    this.bucket = process.env.STORJ_BUCKET as string;
+    this.s3 = new S3Client({
+      endpoint: process.env.STORJ_ENDPOINT || 'https://gateway.storjshare.io',
+      region: process.env.STORJ_REGION || 'us-1',
+      credentials: {
+        accessKeyId: process.env.STORJ_ACCESS_KEY_ID as string,
+        secretAccessKey: process.env.STORJ_SECRET_ACCESS_KEY as string,
+      },
+      // Storj's S3-compatible gateway expects path-style addressing.
+      forcePathStyle: true,
     });
   }
 
   // ---------------------------------------------------------- sign
 
-  signUpload(userId: string, resourceType: 'image' | 'video') {
-    const timestamp = Math.floor(Date.now() / 1000);
-    const folder = `users/${userId}`;
+  async signUpload(userId: string, resourceType: 'image' | 'video', filename?: string) {
+    const ext = this.extractExtension(filename, resourceType);
+    const key = `users/${userId}/${randomUUID()}.${ext}`;
+    const contentType = CONTENT_TYPE_BY_FORMAT[ext] ?? (resourceType === 'image' ? 'image/jpeg' : 'video/mp4');
 
-    // Signature binds folder + timestamp; the client cannot upload outside
-    // their own folder or reuse the signature after Cloudinary's window.
-    const paramsToSign: Record<string, string | number> = { timestamp, folder };
-    const signature = cloudinary.utils.api_sign_request(
-      paramsToSign,
-      process.env.CLOUDINARY_API_SECRET as string,
-    );
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+      ContentType: contentType,
+    });
+    const uploadUrl = await getSignedUrl(this.s3, command, { expiresIn: SIGN_UPLOAD_TTL_SECONDS });
 
     return {
-      cloudName: process.env.CLOUDINARY_CLOUD_NAME,
-      apiKey: process.env.CLOUDINARY_API_KEY, // public identifier, not a secret
-      timestamp,
-      folder,
-      signature,
+      uploadUrl,
+      method: 'PUT' as const,
+      key,
+      contentType,
       resourceType,
-      uploadUrl: `https://api.cloudinary.com/v1_1/${process.env.CLOUDINARY_CLOUD_NAME}/${resourceType}/upload`,
+      expiresIn: SIGN_UPLOAD_TTL_SECONDS,
     };
+  }
+
+  private extractExtension(filename: string | undefined, resourceType: 'image' | 'video'): string {
+    const fallback = resourceType === 'image' ? 'jpg' : 'mp4';
+    if (!filename) return fallback;
+    const match = /\.([a-zA-Z0-9]+)$/.exec(filename);
+    const ext = match?.[1]?.toLowerCase();
+    if (!ext) return fallback;
+    const allowed = resourceType === 'image' ? ALLOWED_IMAGE_FORMATS : ALLOWED_VIDEO_FORMATS;
+    return allowed.includes(ext) ? ext : fallback;
   }
 
   // ---------------------------------------------------------- confirm
 
   async confirmUpload(userId: string, dto: ConfirmUploadDto) {
     // The regex in the DTO already constrains shape; enforce ownership too.
-    if (!dto.publicId.startsWith(`users/${userId}/`)) {
-      throw new ForbiddenException('public_id does not belong to your folder');
+    if (!dto.key.startsWith(`users/${userId}/`)) {
+      throw new ForbiddenException('key does not belong to your folder');
     }
 
-    const existing = await this.prisma.media.findUnique({ where: { publicId: dto.publicId } });
+    const existing = await this.prisma.media.findUnique({ where: { publicId: dto.key } });
     if (existing) return existing; // idempotent confirm
 
-    // Server-side verification via Admin API — never trust client metadata.
-    let asset: any;
+    // Server-side verification via HEAD request — never trust client metadata.
+    let head: any;
     try {
-      asset = await cloudinary.api.resource(dto.publicId, { resource_type: dto.resourceType });
+      head = await this.s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: dto.key }));
     } catch {
       throw new BadRequestException('Asset not found on storage. Upload may have failed.');
     }
 
-    const format = String(asset.format ?? '').toLowerCase();
-    const bytes = Number(asset.bytes ?? 0);
+    const format = (dto.key.split('.').pop() || '').toLowerCase();
+    const bytes = Number(head.ContentLength ?? 0);
 
     if (dto.resourceType === 'image') {
       if (!ALLOWED_IMAGE_FORMATS.includes(format)) throw new BadRequestException('Unsupported image format');
@@ -90,26 +123,26 @@ export class MediaService {
       if (bytes > MAX_VIDEO_BYTES) throw new BadRequestException('Video exceeds size limit');
     }
 
-    await this.virusScanHook(dto.publicId, dto.resourceType);
+    await this.virusScanHook(dto.key, dto.resourceType);
 
     return this.prisma.media.create({
       data: {
         ownerId: userId,
         type: dto.resourceType === 'image' ? MediaType.IMAGE : MediaType.VIDEO,
         status: MediaStatus.READY,
-        publicId: asset.public_id,
-        resourceType: asset.resource_type,
+        publicId: dto.key,
+        resourceType: dto.resourceType,
         format,
-        width: asset.width ?? null,
-        height: asset.height ?? null,
-        duration: asset.duration ?? null,
+        width: null,
+        height: null,
+        duration: null,
         bytes,
       },
     });
   }
 
-  /** Seam for AV / content-moderation pipeline (e.g. Cloudinary moderation add-ons). */
-  private async virusScanHook(_publicId: string, _resourceType: string): Promise<void> {
+  /** Seam for AV / content-moderation pipeline. */
+  private async virusScanHook(_key: string, _resourceType: string): Promise<void> {
     // Intentionally a no-op here. In production, enqueue a BullMQ job that
     // runs moderation/AV and flips Media.status READY only after it passes.
     return;
@@ -165,7 +198,7 @@ export class MediaService {
     return { message: 'Updated' };
   }
 
-  /** Soft delete (trash). A cleanup job purges Cloudinary assets later. */
+  /** Soft delete (trash). A cleanup job purges the Storj object later. */
   async trash(userId: string, mediaId: string) {
     const res = await this.prisma.media.updateMany({
       where: { id: mediaId, ownerId: userId, deletedAt: null },
@@ -180,8 +213,8 @@ export class MediaService {
   /**
    * Returns a delivery URL ONLY if the viewer is entitled:
    * owner, free content, active subscriber, or purchaser.
-   * Signed/authenticated delivery should be enabled on the Cloudinary
-   * account so raw URLs cannot be guessed.
+   * All delivery goes through short-lived presigned GET URLs, so the bucket
+   * itself never needs to be public and raw keys can't be guessed or reused.
    */
   async getDeliveryUrl(viewerId: string, mediaId: string) {
     const media = await this.prisma.media.findUnique({ where: { id: mediaId } });
@@ -190,7 +223,13 @@ export class MediaService {
     const entitled = await this.isEntitled(viewerId, media.ownerId, media.access, media.id);
     if (!entitled) throw new ForbiddenException('Content locked');
 
-    return { url: this.signedUrl(media), type: media.type, width: media.width, height: media.height, duration: media.duration };
+    return {
+      url: await this.signedUrl(media.publicId),
+      type: media.type,
+      width: media.width,
+      height: media.height,
+      duration: media.duration,
+    };
   }
 
   /**
@@ -211,38 +250,24 @@ export class MediaService {
       priceCents: media.priceCents,
       ownerId: media.ownerId,
       locked: !entitled,
-      url: entitled ? this.signedUrl(media) : null,
+      url: entitled ? await this.signedUrl(media.publicId) : null,
       width: media.width,
       height: media.height,
       duration: media.duration,
     };
   }
 
-  /**
-   * Builds a delivery URL. Access is enforced at the API layer (this is only
-   * ever called for an entitled viewer), so we deliver the asset with the same
-   * delivery type it was uploaded as (Cloudinary's default `upload`), secure.
-   *
-   * Production hardening: upload assets as `type: 'authenticated'` (add it to
-   * the signed params in signUpload and to the client upload form), then switch
-   * this back to `type: 'authenticated', sign_url: true` so the CDN itself
-   * refuses un-signed requests. With plain `upload` delivery, anyone holding
-   * the (random, unguessable) URL can view it — fine for dev, not for PPV at scale.
-   */
-  /** Public delivery for FREE media only (avatars, banners, free posts) — no auth. */
+  /** Public delivery for FREE media only (avatars, banners, free posts) — still a short-lived signed URL. */
   async getPublicUrl(mediaId: string) {
     const media = await this.prisma.media.findUnique({ where: { id: mediaId } });
     if (!media || media.deletedAt || media.status !== 'READY') throw new NotFoundException();
     if (media.access !== 'FREE') throw new ForbiddenException('Content locked');
-    return { url: this.signedUrl(media), type: media.type, width: media.width, height: media.height };
+    return { url: await this.signedUrl(media.publicId), type: media.type, width: media.width, height: media.height };
   }
 
-  private signedUrl(media: { publicId: string; resourceType: string; type: string }) {
-    return cloudinary.url(media.publicId, {
-      resource_type: media.resourceType,
-      secure: true,
-      transformation: media.type === 'IMAGE' ? [{ quality: 'auto', fetch_format: 'auto' }] : undefined,
-    });
+  private async signedUrl(key: string): Promise<string> {
+    const command = new GetObjectCommand({ Bucket: this.bucket, Key: key });
+    return getSignedUrl(this.s3, command, { expiresIn: DELIVERY_URL_TTL_SECONDS });
   }
 
   async isEntitled(viewerId: string, ownerId: string, access: ContentAccess, mediaId: string): Promise<boolean> {

@@ -25,9 +25,16 @@ class EnvVars {
   @IsString() RESEND_API_KEY!: string;
   @IsString() MAIL_FROM!: string;
 
-  @IsString() CLOUDINARY_CLOUD_NAME!: string;
-  @IsString() CLOUDINARY_API_KEY!: string;
-  @IsString() CLOUDINARY_API_SECRET!: string;
+  // Storj (S3-compatible) object storage
+  @IsString() STORJ_ACCESS_KEY_ID!: string;
+  @IsString() STORJ_SECRET_ACCESS_KEY!: string;
+  @IsString() STORJ_BUCKET!: string;
+  @IsOptional() @IsUrl({ require_tld: false }) STORJ_ENDPOINT?: string; // default: https://gateway.storjshare.io
+  @IsOptional() @IsString() STORJ_REGION?: string; // default: us-1
+  // Optional public/CDN base URL in front of the bucket (e.g. Storj linksharing
+  // or a custom domain). Used only to scope the CSP img/media directives —
+  // delivery itself always uses presigned URLs, public or private.
+  @IsOptional() @IsUrl({ require_tld: false }) STORJ_PUBLIC_URL?: string;
 
   // Public base URL of THIS API — used to build webhook callback URLs.
   @IsUrl({ require_tld: false }) API_URL!: string;

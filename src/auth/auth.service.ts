@@ -29,6 +29,7 @@ const ARGON_OPTS: argon2.Options = {
 const MAX_FAILED_LOGINS = 5;
 const LOCKOUT_MINUTES = 15;
 const REFRESH_TTL_DAYS = 30;
+const CURRENT_TERMS_VERSION = '2026-07-16'; // bump whenever /terms content materially changes
 
 /**
  * Authentication core. Design decisions:
@@ -59,6 +60,12 @@ export class AuthService {
   // ------------------------------------------------------------ register
 
   async register(dto: RegisterDto, meta: RequestMeta) {
+    // Belt-and-suspenders: the DTO already requires acceptedTerms === true,
+    // but never create an account without an explicit, recorded acceptance.
+    if (dto.acceptedTerms !== true) {
+      throw new BadRequestException('You must confirm you are 18 or older and accept the Terms of Service');
+    }
+
     const [existingEmail, existingUsername] = await Promise.all([
       this.prisma.user.findUnique({ where: { email: dto.email } }),
       this.prisma.profile.findUnique({ where: { username: dto.username } }),
@@ -72,6 +79,8 @@ export class AuthService {
       data: {
         email: dto.email,
         passwordHash,
+        termsAcceptedAt: new Date(),
+        termsVersion: CURRENT_TERMS_VERSION,
         profile: {
           create: { username: dto.username, displayName: dto.displayName },
         },
@@ -80,7 +89,7 @@ export class AuthService {
     });
 
     await this.issueVerificationEmail(user.id, user.email);
-    await this.audit(user.id, 'AUTH_REGISTER', meta);
+    await this.audit(user.id, 'AUTH_REGISTER', meta, { termsVersion: CURRENT_TERMS_VERSION });
 
     // No tokens until email verified — reduces throwaway/bot accounts.
     return { message: 'Account created. Check your email to verify your address.' };

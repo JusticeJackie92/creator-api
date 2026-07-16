@@ -1,6 +1,6 @@
 # Creator Platform API
 
-Security-first backend for a creator monetization platform. **NestJS · TypeScript · Prisma · PostgreSQL · Redis · Socket.IO · NOWPayments (crypto) + PayPal · Cloudinary · Resend.**
+Security-first backend for a creator monetization platform. **NestJS · TypeScript · Prisma · PostgreSQL · Redis · Socket.IO · NOWPayments (crypto) + PayPal · Storj (S3-compatible) · Resend.**
 
 Fully compiles (`tsc` clean) and ships with Docker. Auth, media, content gating, payments fulfillment, and realtime messaging are implemented end-to-end; a few clearly-marked seams (2FA verify step, BullMQ workers) are left as documented next steps.
 
@@ -41,7 +41,7 @@ Or everything in containers: `docker compose up --build`.
 ### Platform hardening
 - **Fail-closed global auth guard** — every route requires a JWT unless explicitly `@Public()`.
 - **Role hierarchy guard** (SUPER_ADMIN > ADMIN > MODERATOR > CREATOR > USER); admins cannot ban admin accounts.
-- **Helmet** (CSP restricted to self + Cloudinary, HSTS preload), strict **CORS whitelist**, `trust proxy`.
+- **Helmet** (CSP restricted to self + the Storj gateway, HSTS preload), strict **CORS whitelist**, `trust proxy`.
 - **Validation everywhere**: global `whitelist + forbidNonWhitelisted` ValidationPipe (mass-assignment safe), the same DTO validation applied to WebSocket payloads.
 - **Fail-fast env validation** — boot refuses weak/missing secrets (all secrets require 32+ chars).
 - **Sanitized errors** — clients get a correlation id, never stack traces or SQL.
@@ -49,11 +49,11 @@ Or everything in containers: `docker compose up --build`.
 - **Audit log** of security events (login, lockout, token replay, resets, admin actions).
 - IDOR-safe data access: every mutation is scoped `WHERE id AND ownerId` — no fetch-then-check races.
 
-### Media (Cloudinary signed direct upload)
-1. `POST /media/sign` → server signs `{timestamp, folder: users/{userId}}` — **API secret never leaves the server**, signature can't upload outside the caller's folder.
-2. Client uploads **directly** to Cloudinary (files never transit our API).
-3. `POST /media/confirm` → server **independently verifies the asset via Cloudinary's Admin API** (never trusts client metadata), enforces format/size allow-lists, runs a `virusScanHook()` seam, then persists only `public_id + metadata`.
-4. Delivery: `GET /media/:id/url` returns a **signed authenticated URL only after an entitlement check** (owner / free / active subscriber / purchaser). Locking is server-side, never client-side blurring.
+### Media (Storj signed direct upload)
+1. `POST /media/sign` → server picks a server-controlled object key `users/{userId}/{uuid}.ext` and returns a **presigned S3 PUT URL** (10 min TTL) — **storage credentials never leave the server**, and the key can't be chosen or escaped by the client.
+2. Client uploads **directly** to Storj's S3-compatible gateway (files never transit our API).
+3. `POST /media/confirm` → server **independently verifies the object via a HEAD request** (never trusts client metadata), enforces format/size allow-lists, runs a `virusScanHook()` seam, then persists only the object key + metadata.
+4. Delivery: `GET /media/:id/url` returns a **short-lived presigned GET URL only after an entitlement check** (owner / free / active subscriber / purchaser). Locking is server-side, never client-side blurring.
 
 ### Payments (NOWPayments crypto + PayPal)
 - **Webhooks are the only source of truth** — client "success" redirects never credit anything.
@@ -98,7 +98,7 @@ Or everything in containers: `docker compose up --build`.
 
 ## Production checklist
 - Generate unique 48-byte secrets for all four secret vars; store in a secrets manager.
-- Enable Cloudinary **authenticated/strict delivery** so raw asset URLs can't be guessed.
+- Storj delivery already uses short-lived presigned GET URLs by default — no bucket-level public access needed.
 - Put the API behind TLS (the refresh cookie is `Secure` in production).
 - Register webhook endpoints: `/api/v1/payments/webhooks/nowpayments` (NOWPayments IPN) and `/api/v1/payments/webhooks/paypal` (PayPal). Set `PAYPAL_WEBHOOK_ID` to the id PayPal assigns your webhook.
 - Verify a sending domain in Resend and set `MAIL_FROM` accordingly.

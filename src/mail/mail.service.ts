@@ -15,13 +15,24 @@ export class MailService {
   private readonly appUrl = process.env.APP_URL as string;
   private readonly logger = new Logger(MailService.name);
 
-  private async send(to: string, subject: string, html: string) {
+  private async send(to: string, subject: string, html: string, text?: string) {
     try {
-      await this.resend.emails.send({ from: this.from, to, subject, html });
+      await this.resend.emails.send({ from: this.from, to, subject, html, text: text ?? this.htmlToText(html) });
     } catch (err) {
       // Do not throw into user-facing flows; queue/retry in production.
       this.logger.error(`Resend send failed to ${to}: ${(err as Error).message}`);
     }
+  }
+
+  /** Very small fallback so every email always has a usable plain-text part with real, clickable-when-pasted URLs. */
+  private htmlToText(html: string): string {
+    return html
+      .replace(/<a\s+[^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/gi, '$2: $1')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/p>/gi, '\n\n')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
 
   private layout(title: string, bodyHtml: string) {
@@ -36,7 +47,15 @@ export class MailService {
   }
 
   private button(url: string, label: string) {
-    return `<a href="${url}" style="display:inline-block;background:#6d5efc;color:#fff;text-decoration:none;padding:12px 24px;border-radius:10px;font-weight:600;">${label}</a>`;
+    // The styled button is the primary call-to-action, but some mail clients
+    // (Outlook desktop, plain-text views, certain proxy image/style strippers)
+    // don't render inline-block anchors reliably. Always include the raw URL
+    // as visible, selectable text underneath so the link is clickable either way.
+    return `<a href="${url}" style="display:inline-block;background:#6d5efc;color:#fff;text-decoration:none;padding:12px 24px;border-radius:10px;font-weight:600;">${label}</a>
+      <p style="font-size:12px;color:#8a8aa3;margin-top:14px;word-break:break-all;">
+        Or copy and paste this link into your browser:<br/>
+        <a href="${url}" style="color:#a8a0ff;">${url}</a>
+      </p>`;
   }
 
   async sendVerificationEmail(to: string, token: string) {

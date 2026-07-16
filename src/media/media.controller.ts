@@ -15,7 +15,7 @@ export class MediaController {
   @Post('sign')
   @Throttle({ default: { ttl: 60_000, limit: 30 } })
   sign(@CurrentUser() user: AuthUser, @Body() dto: SignUploadDto) {
-    return this.media.signUpload(user.id, dto.resourceType);
+    return this.media.signUpload(user.id, dto.resourceType, dto.filename);
   }
 
   @Post('confirm')

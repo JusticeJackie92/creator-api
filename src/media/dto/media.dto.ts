@@ -6,16 +6,20 @@ export class SignUploadDto {
   @ApiProperty({ enum: ['image', 'video'] })
   @IsIn(['image', 'video'])
   resourceType!: 'image' | 'video';
+
+  @ApiPropertyOptional({ description: 'Original filename, used only to infer an extension' })
+  @IsOptional() @IsString() @MaxLength(255)
+  filename?: string;
 }
 
 export class ConfirmUploadDto {
-  @ApiProperty({ description: 'Cloudinary public_id returned after upload' })
-  @IsString() @MaxLength(255)
+  @ApiProperty({ description: 'Storj object key returned by /media/sign' })
+  @IsString() @MaxLength(512)
   // Must live under the users/ tree. The exact "users/{callerId}/..." ownership
   // check is enforced in MediaService.confirmUpload against the JWT user id, so
   // this only needs to guard the general shape (any id, nested paths allowed).
-  @Matches(/^users\/[^/]+\/[A-Za-z0-9._/-]+$/, { message: 'Invalid public_id' })
-  publicId!: string;
+  @Matches(/^users\/[^/]+\/[A-Za-z0-9._/-]+$/, { message: 'Invalid object key' })
+  key!: string;
 
   @ApiProperty({ enum: ['image', 'video'] })
   @IsIn(['image', 'video'])

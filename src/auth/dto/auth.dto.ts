@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEmail, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { Equals, IsEmail, IsNotEmpty, IsString, Matches, MaxLength, MinLength } from 'class-validator';
 import { Transform } from 'class-transformer';
 
 /**
@@ -24,6 +24,15 @@ export class RegisterDto {
 
   @ApiProperty() @IsString() @IsNotEmpty() @MaxLength(50)
   displayName!: string;
+
+  @ApiProperty({
+    description:
+      'Must be true: confirms the user is 18+ and agrees to the Terms of Service, ' +
+      'Privacy Policy, and that the platform hosts adult (18+) content.',
+  })
+  @Transform(({ value }) => value === true || value === 'true')
+  @Equals(true, { message: 'You must confirm you are 18 or older and accept the Terms of Service' })
+  acceptedTerms!: boolean;
 }
 
 export class LoginDto {

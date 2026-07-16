@@ -25,13 +25,21 @@ async function bootstrap() {
   app.set('trust proxy', 1); // correct client IPs behind reverse proxy
   app.disable('x-powered-by');
 
+  const storjOrigins = Array.from(
+    new Set(
+      [process.env.STORJ_ENDPOINT || 'https://gateway.storjshare.io', process.env.STORJ_PUBLIC_URL]
+        .filter((v): v is string => !!v)
+        .map((v) => new URL(v).origin),
+    ),
+  );
+
   app.use(
     helmet({
       contentSecurityPolicy: {
         directives: {
           defaultSrc: ["'self'"],
-          imgSrc: ["'self'", 'https://res.cloudinary.com', 'data:'],
-          mediaSrc: ["'self'", 'https://res.cloudinary.com'],
+          imgSrc: ["'self'", ...storjOrigins, 'data:'],
+          mediaSrc: ["'self'", ...storjOrigins],
         },
       },
       crossOriginEmbedderPolicy: false,
